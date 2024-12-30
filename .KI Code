@@ -1,0 +1,138 @@
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <painlessMesh.h>
+#include <U8g2lib.h>
+#include <ArduinoJson.h>
+
+// Mesh-Konfiguration
+#define MESH_PREFIX "AI_Mesh"
+#define MESH_PASSWORD "12345678"
+#define MESH_PORT 5555
+
+painlessMesh mesh;
+
+// OLED-Konfiguration
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ 5, /* data=*/ 4);
+
+// Sprach-Lernlogik
+struct Word {
+  String term;
+  int weight;
+};
+Word dictionary[10]; // Maximal 10 Begriffe
+int dictionarySize = 0;
+
+// Funktion: Neues Wort hinzufügen
+void addWord(String term) {
+  for (int i = 0; i < dictionarySize; i++) {
+    if (dictionary[i].term == term) {
+      dictionary[i].weight++; // Gewicht erhöhen, wenn Begriff existiert
+      return;
+    }
+  }
+
+  // Neues Wort hinzufügen
+  if (dictionarySize < 10) {
+    dictionary[dictionarySize].term = term;
+    dictionary[dictionarySize].weight = 1;
+    dictionarySize++;
+  }
+}
+
+// Funktion: Beste Wörter anzeigen
+String getTopWords() {
+  String result = "";
+  for (int i = 0; i < dictionarySize; i++) {
+    result += dictionary[i].term + " (" + String(dictionary[i].weight) + ")";
+    if (i < dictionarySize - 1) result += ", ";
+  }
+  return result;
+}
+
+// Callback: Nachrichten empfangen
+void receivedCallback(uint32_t from, String &msg) {
+  StaticJsonDocument<256> doc;
+  deserializeJson(doc, msg);
+
+  if (doc.containsKey("word")) {
+    String receivedWord = doc["word"];
+    addWord(receivedWord); // Lernen
+
+    // Neues Wort generieren und senden
+    String newWord = receivedWord + char(random(97, 123)); // Zufälligen Buchstaben anhängen
+    StaticJsonDocument<256> outDoc;
+    outDoc["word"] = newWord;
+
+    String jsonString;
+    serializeJson(outDoc, jsonString);
+    mesh.sendBroadcast(jsonString);
+
+    // OLED aktualisieren
+    displayStatus(newWord, from);
+  }
+}
+
+// Funktion: Status auf OLED anzeigen
+void displayStatus(String word, uint32_t from) {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.drawStr(0, 10, "Kommunikation:");
+  String displayWord = "Von: " + String(from);
+  u8g2.drawStr(0, 30, displayWord.c_str());
+  u8g2.drawStr(0, 50, ("Wort: " + word).c_str());
+  u8g2.sendBuffer();
+}
+
+// Debugging: Verbundene Knoten anzeigen
+void printConnections() {
+  SimpleList<uint32_t> nodes = mesh.getNodeList();
+  Serial.println("Verbundene Knoten:");
+  for (auto node : nodes) {
+    Serial.printf(" - Knoten-ID: %u\n", node);
+  }
+}
+
+// Setup
+void setup() {
+  Serial.begin(115200);
+
+  // OLED initialisieren
+  u8g2.begin();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  displayStatus("Start", 0);
+
+  // Mesh initialisieren
+  mesh.setDebugMsgTypes(ERROR | STARTUP | CONNECTION); // Debug-Modus aktivieren
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, MESH_PORT);
+  mesh.onReceive(&receivedCallback);
+
+  Serial.println("KI-Mesh gestartet...");
+}
+
+// Loop
+void loop() {
+  mesh.update();
+
+  // Debugging: Verbindungen alle 10 Sekunden prüfen
+  static unsigned long lastTime = 0;
+  if (millis() - lastTime > 10000) {
+    printConnections();
+    lastTime = millis();
+  }
+
+  // Alle 5 Sekunden ein zufälliges Wort senden
+  static unsigned long lastWordTime = 0;
+  if (millis() - lastWordTime > 5000) {
+    String randomWord = String(char(random(97, 123))) + String(char(random(97, 123))); // Zufälliges Wort
+    StaticJsonDocument<256> doc;
+    doc["word"] = randomWord;
+
+    String jsonString;
+    serializeJson(doc, jsonString);
+    mesh.sendBroadcast(jsonString);
+
+    // OLED aktualisieren
+    displayStatus(randomWord, 0);
+    lastWordTime = millis();
+  }
+}
